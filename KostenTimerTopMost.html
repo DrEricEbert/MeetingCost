@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <title>Meeting-Kosten (HTML/JS, Overlay & JSON)</title>
+  <title>Meeting-Kosten (HTML/JS, Dock-Fenster & JSON)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --fg:#222; --muted:#666; }
@@ -29,23 +29,6 @@
     td.actions { width:80px; }
     .count { color:var(--muted); font-size:12px; }
     .nowrap { white-space:nowrap; }
-
-    /* Fallback: in-page Mini-Overlay (wenn Doc PiP nicht verfügbar) */
-    .float-overlay {
-      position: fixed; top: 12px; right: 12px; z-index: 2147483647;
-      width: 320px; background: #fff; border: 1px solid #aaa; border-radius: 10px;
-      box-shadow: 0 8px 24px rgba(0,0,0,.15);
-      user-select: none;
-    }
-    .float-overlay .hdr {
-      padding: 8px 10px; background: #f5f5f5; border-bottom: 1px solid #ddd; cursor: move; border-radius: 10px 10px 0 0;
-      display:flex; align-items:center; justify-content:space-between;
-    }
-    .float-overlay .body { padding: 10px; user-select: auto; }
-    .float-overlay .time { font-size: 24px; }
-    .float-overlay .row { margin: 6px 0; }
-    .float-overlay .buttons { gap:6px; }
-    .float-overlay .close { background:#eee; border:1px solid #bbb; border-radius:6px; cursor:pointer; padding:4px 8px; }
   </style>
 </head>
 <body>
@@ -82,7 +65,7 @@
     <button id="exportJson">Meetings exportieren (JSON)</button>
     <button id="importJson">Meetings importieren (JSON)</button>
     <button id="clearAll">Alle löschen</button>
-    <button id="toggleOverlay">Ausdocken (Overlay)</button>
+    <button id="toggleDock">Ausdocken (Fenster)</button>
     <input id="importFile" type="file" accept="application/json" style="display:none" />
   </section>
 
@@ -92,7 +75,7 @@
   </section>
 
   <p id="status"></p>
-  <p class="muted">Overlay-Hinweis: Echte Always-on-Top-Overlays funktionieren mit Chrome/Edge (Document Picture-in-Picture). In anderen Browsern nutzt die Seite ein schwebendes Panel innerhalb der Seite.</p>
+  <p class="muted">Hinweis: Always-on-Top funktioniert mit Chrome/Edge via Document Picture-in-Picture. Sonst wird ein normales Popup-Fenster genutzt.</p>
 
   <section class="saved">
     <h2>Gespeicherte Meetings <span id="meetingCount" class="count"></span></h2>
@@ -116,7 +99,7 @@
       clearAll: document.getElementById('clearAll'),
       costInternal: document.getElementById('costInternal'),
       costExternal: document.getElementById('costExternal'),
-      toggleOverlay: document.getElementById('toggleOverlay'),
+      toggleDock: document.getElementById('toggleDock'),
       status: document.getElementById('status'),
       list: document.getElementById('list'),
       meetingCount: document.getElementById('meetingCount')
@@ -136,23 +119,19 @@
       const s = sec % 60;
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
-
     function parseRate(v) {
       if (typeof v !== 'string') v = String(v ?? '');
       v = v.replace(',', '.').trim();
       const n = parseFloat(v);
       return isFinite(n) && n > 0 ? n : 0;
     }
-
     function parseIntSafe(v) {
       const n = parseInt(String(v ?? '0'), 10);
       return isFinite(n) && n > 0 ? n : 0;
     }
-
     function currentElapsedMs() {
       return running ? (elapsedBefore + (performance.now() - startTime)) : elapsedBefore;
     }
-
     function computeCanSave(elapsedSec) {
       const p = parseIntSafe(els.participants.value);
       const iRate = parseRate(els.rateInternal.value);
@@ -178,8 +157,8 @@
       const canSave = computeCanSave(elapsedSec);
       els.save.disabled = !canSave;
 
-      // Overlay mit-aktualisieren
-      updateOverlayUI({ elapsedSec, costIn, costEx, canSave });
+      // Dock-Fenster aktualisieren
+      updateDockUI({ elapsedSec, costIn, costEx, canSave });
     }
 
     function toggleStartPause() {
@@ -214,10 +193,14 @@
     function setStatus(msg, isError = false) {
       els.status.textContent = msg || '';
       els.status.classList.toggle('error', !!isError);
+      if (dockEls?.status) {
+        dockEls.status.textContent = msg || '';
+        dockEls.status.style.color = isError ? '#b00020' : '#0b5';
+      }
     }
 
     // JSON-Speicher (localStorage)
-    const STORE_KEY = 'meeting_costs_store_v1';
+    const STORE_KEY = 'meeting_costs_store_v2';
     function loadStore() {
       try {
         const raw = localStorage.getItem(STORE_KEY);
@@ -323,7 +306,7 @@
       });
     }
 
-    // Speichern
+    // Meeting speichern
     function onSaveMeeting() {
       const elapsedSec = Math.floor(currentElapsedMs() / 1000);
       if (elapsedSec <= 0) { setStatus('Dauer ist 0 Sekunden – bitte erst starten.', true); return; }
@@ -346,219 +329,161 @@
       updateUI();
     }
 
-    // Overlay: Document Picture-in-Picture + Fallback
-    let pipWin = null;
-    let pipEls = null;
-    let floatOverlay = null;
-    let floatEls = null;
+    // Dock-Fenster: Document Picture-in-Picture (Always-on-Top) oder Popup-Fallback
+    let dockWin = null;
+    let dockMode = null; // 'pip' | 'popup'
+    let dockEls = null;  // Referenzen auf Elemente im Dock
 
-    function isOverlayOpen() { return !!(pipWin || floatOverlay); }
-    function updateOverlayToggleBtn() {
-      els.toggleOverlay.textContent = isOverlayOpen() ? 'Andocken' : 'Ausdocken (Overlay)';
+    function isDockOpen() { return !!dockWin && !dockWin.closed; }
+    function updateDockToggleBtn() {
+      els.toggleDock.textContent = isDockOpen() ? 'Andocken' : 'Ausdocken (Fenster)';
     }
 
-    async function openOverlay() {
+    async function openDockWindow() {
+      if (isDockOpen()) { try { dockWin.focus(); } catch {} return; }
+
+      // 1) Versuch: Document Picture-in-Picture (Always-on-Top)
       if ('documentPictureInPicture' in window && documentPictureInPicture?.requestWindow) {
-        try { await openPipOverlay(); return; } catch (e) { console.warn('Doc PiP fehlgeschlagen, Fallback:', e); }
+        try {
+          dockWin = await documentPictureInPicture.requestWindow({ width: 380, height: 360 });
+          dockMode = 'pip';
+          buildDockUi(dockWin.document);
+          // Schließen-Event
+          dockWin.addEventListener('pagehide', () => closeDockWindow(), { once: true });
+          try { dockWin.focus(); } catch {}
+          updateDockToggleBtn();
+          syncDockFromMain();
+          updateUI();
+          return;
+        } catch (e) {
+          console.warn('Document Picture-in-Picture nicht verfügbar/fehlgeschlagen:', e);
+        }
       }
-      openInPageOverlay();
+
+      // 2) Fallback: Popup
+      const w = 400, h = 380;
+      const left = window.screenX + Math.max(0, window.outerWidth - w - 40);
+      const top = window.screenY + 40;
+      dockWin = window.open('', 'MeetingDock', `popup=yes,width=${w},height=${h},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=no`);
+      if (!dockWin) { setStatus('Popup wurde blockiert. Bitte Popups für diese Seite erlauben.', true); return; }
+      dockMode = 'popup';
+      buildDockUi(dockWin.document);
+      // Schließen-Checker
+      const closeCheck = setInterval(() => {
+        if (!isDockOpen()) { clearInterval(closeCheck); closeDockWindow(); }
+      }, 800);
+      try { dockWin.focus(); } catch {}
+      updateDockToggleBtn();
+      syncDockFromMain();
+      updateUI();
     }
 
-    async function openPipOverlay() {
-      if (pipWin) return;
-      pipWin = await documentPictureInPicture.requestWindow({ width: 360, height: 320 });
-      const d = pipWin.document;
-      d.title = 'Meeting Overlay';
-      d.body.style.margin = '0';
-      d.body.innerHTML = `
-        <style>
-          body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; padding:10px; }
-          .time { font-weight:700; font-size:24px; margin-bottom:8px; }
-          .row { display:flex; gap:8px; align-items:center; margin:4px 0; }
-          label { width:110px; font-size:12px; color:#444; }
-          input[type="text"], input[type="number"] { padding:4px 6px; width:150px; border:1px solid #bbb; border-radius:6px; }
-          .costs div { margin:2px 0; }
-          .buttons { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
-          button { padding:6px 10px; border:1px solid #aaa; background:#f5f5f5; border-radius:6px; cursor:pointer; }
-          button:disabled { opacity:.6; cursor:not-allowed; }
-        </style>
-        <div class="time" id="pipTime">00:00:00</div>
-        <div class="costs">
-          <div>Intern: <strong id="pipCostIn">0,00 €</strong></div>
-          <div>Extern: <strong id="pipCostEx">0,00 €</strong></div>
-        </div>
-        <div class="row"><label>Name</label><input id="pipName" type="text" placeholder="Meeting-Name"></div>
-        <div class="row"><label>Teilnehmer</label><input id="pipParticipants" type="number" min="0" step="1"></div>
-        <div class="row"><label>Satz intern</label><input id="pipRateIn" type="number" min="0" step="0.01"></div>
-        <div class="row"><label>Satz extern</label><input id="pipRateEx" type="number" min="0" step="0.01"></div>
-        <div class="buttons">
-          <button id="pipStartPause">Start</button>
-          <button id="pipReset">Reset</button>
-          <button id="pipSave" disabled>Speichern</button>
-          <button id="pipClose">Schließen</button>
-        </div>
-      `;
-      pipEls = {
-        time: d.getElementById('pipTime'),
-        costIn: d.getElementById('pipCostIn'),
-        costEx: d.getElementById('pipCostEx'),
-        name: d.getElementById('pipName'),
-        participants: d.getElementById('pipParticipants'),
-        rateIn: d.getElementById('pipRateIn'),
-        rateEx: d.getElementById('pipRateEx'),
-        startPause: d.getElementById('pipStartPause'),
-        reset: d.getElementById('pipReset'),
-        save: d.getElementById('pipSave'),
-        close: d.getElementById('pipClose')
+    function buildDockUi(doc) {
+      doc.open();
+      doc.write(`
+        <!doctype html><html lang="de"><head>
+          <meta charset="utf-8" />
+          <title>Meeting Dock</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <style>
+            :root { --fg:#222; --muted:#666; }
+            * { box-sizing:border-box; }
+            body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color:var(--fg); margin:10px; }
+            .time { font-weight:700; font-size:24px; margin-bottom:8px; }
+            .row { display:flex; gap:8px; align-items:center; margin:4px 0; }
+            label { width:110px; font-size:12px; color:#444; }
+            input[type="text"], input[type="number"] { padding:4px 6px; width:160px; border:1px solid #bbb; border-radius:6px; }
+            .costs div { margin:2px 0; }
+            .buttons { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+            button { padding:6px 10px; border:1px solid #aaa; background:#f5f5f5; border-radius:6px; cursor:pointer; }
+            button:disabled { opacity:.6; cursor:not-allowed; }
+            #statusDock { min-height:1.2em; margin-top:6px; color:#0b5; }
+          </style>
+        </head><body>
+          <div class="time" id="dTime">00:00:00</div>
+          <div class="costs">
+            <div>Intern: <strong id="dCostIn">0,00 €</strong></div>
+            <div>Extern: <strong id="dCostEx">0,00 €</strong></div>
+          </div>
+          <div class="row"><label>Name</label><input id="dName" type="text" placeholder="Meeting-Name"></div>
+          <div class="row"><label>Teilnehmer</label><input id="dParticipants" type="number" min="0" step="1"></div>
+          <div class="row"><label>Satz intern</label><input id="dRateIn" type="number" min="0" step="0.01"></div>
+          <div class="row"><label>Satz extern</label><input id="dRateEx" type="number" min="0" step="0.01"></div>
+          <div class="buttons">
+            <button id="dStartPause">Start</button>
+            <button id="dReset">Reset</button>
+            <button id="dSave" disabled>Speichern</button>
+            <button id="dClose">Schließen</button>
+          </div>
+          <div id="statusDock"></div>
+        </body></html>
+      `);
+      doc.close();
+
+      dockEls = {
+        time: doc.getElementById('dTime'),
+        costIn: doc.getElementById('dCostIn'),
+        costEx: doc.getElementById('dCostEx'),
+        name: doc.getElementById('dName'),
+        participants: doc.getElementById('dParticipants'),
+        rateIn: doc.getElementById('dRateIn'),
+        rateEx: doc.getElementById('dRateEx'),
+        startPause: doc.getElementById('dStartPause'),
+        reset: doc.getElementById('dReset'),
+        save: doc.getElementById('dSave'),
+        close: doc.getElementById('dClose'),
+        status: doc.getElementById('statusDock')
       };
-      // Bridge Events -> Hauptfenster
-      pipEls.startPause.addEventListener('click', () => toggleStartPause());
-      pipEls.reset.addEventListener('click', () => resetAll());
-      pipEls.save.addEventListener('click', () => onSaveMeeting());
-      pipEls.close.addEventListener('click', () => closeOverlay());
-      [pipEls.name, pipEls.participants, pipEls.rateIn, pipEls.rateEx].forEach(el => {
+
+      // Events im Dock: steuern die Hauptlogik
+      dockEls.startPause.addEventListener('click', toggleStartPause);
+      dockEls.reset.addEventListener('click', resetAll);
+      dockEls.save.addEventListener('click', onSaveMeeting);
+      dockEls.close.addEventListener('click', closeDockWindow);
+
+      [dockEls.name, dockEls.participants, dockEls.rateIn, dockEls.rateEx].forEach(el => {
         el.addEventListener('input', () => {
-          els.name.value = pipEls.name.value;
-          els.participants.value = pipEls.participants.value;
-          els.rateInternal.value = pipEls.rateIn.value;
-          els.rateExternal.value = pipEls.rateEx.value;
+          els.name.value = dockEls.name.value;
+          els.participants.value = dockEls.participants.value;
+          els.rateInternal.value = dockEls.rateIn.value;
+          els.rateExternal.value = dockEls.rateEx.value;
           updateUI();
         });
       });
-      // Shortcuts im Overlay
-      d.addEventListener('keydown', (e) => {
+
+      // Shortcuts im Dock
+      dockWin.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); onSaveMeeting(); }
         else if (e.key === ' ') { e.preventDefault(); toggleStartPause(); }
         else if (e.key === 'Escape') { resetAll(); }
       });
-      // Schließen-Handler
-      pipWin.addEventListener('pagehide', () => closeOverlay(), { once: true });
-      // Initialwerte spiegeln
-      syncInputsToOverlay();
-      updateUI();
-      updateOverlayToggleBtn();
     }
 
-    function openInPageOverlay() {
-      if (floatOverlay) return;
-      floatOverlay = document.createElement('div');
-      floatOverlay.className = 'float-overlay';
-      floatOverlay.innerHTML = `
-        <div class="hdr"><strong>Meeting Overlay</strong><button class="close" id="foClose">×</button></div>
-        <div class="body">
-          <div class="time" id="foTime">00:00:00</div>
-          <div class="costs">
-            <div>Intern: <strong id="foCostIn">0,00 €</strong></div>
-            <div>Extern: <strong id="foCostEx">0,00 €</strong></div>
-          </div>
-          <div class="row"><label style="width:90px">Name</label><input id="foName" type="text" placeholder="Meeting-Name"></div>
-          <div class="row"><label style="width:90px">Teilnehmer</label><input id="foParticipants" type="number" min="0" step="1"></div>
-          <div class="row"><label style="width:90px">Satz intern</label><input id="foRateIn" type="number" min="0" step="0.01"></div>
-          <div class="row"><label style="width:90px">Satz extern</label><input id="foRateEx" type="number" min="0" step="0.01"></div>
-          <div class="buttons">
-            <button id="foStartPause">Start</button>
-            <button id="foReset">Reset</button>
-            <button id="foSave" disabled>Speichern</button>
-            <button id="foDock">Andocken</button>
-          </div>
-        </div>
-      `;
-      document.body.appendChild(floatOverlay);
-      const d = floatOverlay;
-      floatEls = {
-        root: d,
-        hdr: d.querySelector('.hdr'),
-        time: d.querySelector('#foTime'),
-        costIn: d.querySelector('#foCostIn'),
-        costEx: d.querySelector('#foCostEx'),
-        name: d.querySelector('#foName'),
-        participants: d.querySelector('#foParticipants'),
-        rateIn: d.querySelector('#foRateIn'),
-        rateEx: d.querySelector('#foRateEx'),
-        startPause: d.querySelector('#foStartPause'),
-        reset: d.querySelector('#foReset'),
-        save: d.querySelector('#foSave'),
-        close: d.querySelector('#foClose'),
-        dock: d.querySelector('#foDock')
-      };
-      // Drag bewegen
-      let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-      floatEls.hdr.addEventListener('pointerdown', (e) => {
-        dragging = true; floatOverlay.setPointerCapture(e.pointerId);
-        startX = e.clientX; startY = e.clientY;
-        const rect = floatOverlay.getBoundingClientRect();
-        startLeft = rect.left; startTop = rect.top;
-      });
-      floatEls.hdr.addEventListener('pointermove', (e) => {
-        if (!dragging) return;
-        const dx = e.clientX - startX, dy = e.clientY - startY;
-        floatOverlay.style.left = (startLeft + dx) + 'px';
-        floatOverlay.style.top = (startTop + dy) + 'px';
-        floatOverlay.style.right = 'auto';
-      });
-      floatEls.hdr.addEventListener('pointerup', (e) => { dragging = false; floatOverlay.releasePointerCapture(e.pointerId); });
-
-      // Events -> Hauptfenster
-      floatEls.startPause.addEventListener('click', () => toggleStartPause());
-      floatEls.reset.addEventListener('click', () => resetAll());
-      floatEls.save.addEventListener('click', () => onSaveMeeting());
-      floatEls.close.addEventListener('click', () => closeOverlay());
-      floatEls.dock.addEventListener('click', () => closeOverlay());
-      [floatEls.name, floatEls.participants, floatEls.rateIn, floatEls.rateEx].forEach(el => {
-        el.addEventListener('input', () => {
-          els.name.value = floatEls.name.value;
-          els.participants.value = floatEls.participants.value;
-          els.rateInternal.value = floatEls.rateIn.value;
-          els.rateExternal.value = floatEls.rateEx.value;
-          updateUI();
-        });
-      });
-      // Initialwerte spiegeln
-      syncInputsToOverlay();
-      updateUI();
-      updateOverlayToggleBtn();
+    function syncDockFromMain() {
+      if (!dockEls) return;
+      dockEls.name.value = els.name.value;
+      dockEls.participants.value = els.participants.value;
+      dockEls.rateIn.value = els.rateInternal.value;
+      dockEls.rateEx.value = els.rateExternal.value;
+      dockEls.startPause.textContent = running ? 'Pause' : (elapsedBefore > 0 ? 'Weiter' : 'Start');
     }
 
-    function syncInputsToOverlay() {
-      if (pipEls) {
-        pipEls.name.value = els.name.value;
-        pipEls.participants.value = els.participants.value;
-        pipEls.rateIn.value = els.rateInternal.value;
-        pipEls.rateEx.value = els.rateExternal.value;
-      }
-      if (floatEls) {
-        floatEls.name.value = els.name.value;
-        floatEls.participants.value = els.participants.value;
-        floatEls.rateIn.value = els.rateInternal.value;
-        floatEls.rateEx.value = els.rateExternal.value;
-      }
+    function updateDockUI({ elapsedSec, costIn, costEx, canSave }) {
+      if (!dockEls) return;
+      dockEls.time.textContent = formatTime(elapsedSec);
+      dockEls.costIn.textContent = euroFmt.format(costIn);
+      dockEls.costEx.textContent = euroFmt.format(costEx);
+      dockEls.save.disabled = !canSave;
+      dockEls.startPause.textContent = running ? 'Pause' : (elapsedBefore > 0 ? 'Weiter' : 'Start');
     }
 
-    function closeOverlay() {
-      if (pipWin) { try { pipWin.close(); } catch {} pipWin = null; pipEls = null; }
-      if (floatOverlay) { floatOverlay.remove(); floatOverlay = null; floatEls = null; }
-      updateOverlayToggleBtn();
+    function closeDockWindow() {
+      try { if (dockWin && !dockWin.closed) dockWin.close(); } catch {}
+      dockWin = null; dockEls = null; dockMode = null;
+      updateDockToggleBtn();
     }
 
-    function updateOverlayUI({ elapsedSec, costIn, costEx, canSave }) {
-      const btnText = running ? 'Pause' : (elapsedBefore > 0 ? 'Weiter' : 'Start');
-      if (pipEls) {
-        pipEls.time.textContent = formatTime(elapsedSec);
-        pipEls.costIn.textContent = euroFmt.format(costIn);
-        pipEls.costEx.textContent = euroFmt.format(costEx);
-        pipEls.startPause.textContent = btnText;
-        pipEls.save.disabled = !canSave;
-      }
-      if (floatEls) {
-        floatEls.time.textContent = formatTime(elapsedSec);
-        floatEls.costIn.textContent = euroFmt.format(costIn);
-        floatEls.costEx.textContent = euroFmt.format(costEx);
-        floatEls.startPause.textContent = btnText;
-        floatEls.save.disabled = !canSave;
-      }
-    }
-
-    // Events
+    // Events (Hauptfenster)
     els.startPause.addEventListener('click', toggleStartPause);
     els.reset.addEventListener('click', resetAll);
     els.save.addEventListener('click', onSaveMeeting);
@@ -570,11 +495,11 @@
       els.importFile.value = '';
     });
     els.clearAll.addEventListener('click', clearAllMeetings);
-    els.toggleOverlay.addEventListener('click', () => { isOverlayOpen() ? closeOverlay() : openOverlay(); });
+    els.toggleDock.addEventListener('click', () => { isDockOpen() ? closeDockWindow() : openDockWindow(); });
 
     ['input', 'change'].forEach(evt => {
       [els.name, els.participants, els.rateInternal, els.rateExternal].forEach(el => {
-        el.addEventListener(evt, () => { setStatus(''); updateUI(); syncInputsToOverlay(); });
+        el.addEventListener(evt, () => { setStatus(''); updateUI(); syncDockFromMain(); });
       });
     });
 
@@ -593,7 +518,7 @@
     // Initial
     renderMeetingList();
     updateUI();
-    updateOverlayToggleBtn();
+    updateDockToggleBtn();
   </script>
 </body>
 </html>
