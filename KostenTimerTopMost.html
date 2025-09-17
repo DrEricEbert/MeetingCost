@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Meeting-Kosten (HTML/JS, Overlay & JSON)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --fg:#222; --muted:#666; }
+    * { box-sizing:border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color:var(--fg); margin:16px; }
+    h1 { font-size:18px; margin:0 0 12px; }
+    h2 { font-size:16px; margin:16px 0 8px; }
+    .time { font-weight:700; font-size:32px; letter-spacing:1px; }
+    .params, .costs, .saved { margin-top:12px; }
+    .row { display:flex; gap:12px; align-items:center; margin:6px 0; }
+    .row.two > div { display:flex; flex-direction:column; }
+    label { width:160px; }
+    input[type="text"], input[type="number"] { padding:6px 8px; border:1px solid #bbb; border-radius:6px; width:200px; }
+    .buttons { margin:12px 0; display:flex; gap:8px; flex-wrap:wrap; }
+    button { padding:8px 12px; border:1px solid #aaa; background:#f5f5f5; border-radius:6px; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .costs div { margin:4px 0; }
+    #status { min-height:1.2em; margin-top:8px; color:#0b5; }
+    #status.error { color:#b00020; }
+    .muted { color:var(--muted); font-size:12px; margin-top:8px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th, td { border:1px solid #ddd; padding:6px 8px; text-align:left; vertical-align:top; }
+    th { background:#f3f3f3; }
+    td.actions { width:80px; }
+    .count { color:var(--muted); font-size:12px; }
+    .nowrap { white-space:nowrap; }
+
+    /* Fallback: in-page Mini-Overlay (wenn Doc PiP nicht verfügbar) */
+    .float-overlay {
+      position: fixed; top: 12px; right: 12px; z-index: 2147483647;
+      width: 320px; background: #fff; border: 1px solid #aaa; border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.15);
+      user-select: none;
+    }
+    .float-overlay .hdr {
+      padding: 8px 10px; background: #f5f5f5; border-bottom: 1px solid #ddd; cursor: move; border-radius: 10px 10px 0 0;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    .float-overlay .body { padding: 10px; user-select: auto; }
+    .float-overlay .time { font-size: 24px; }
+    .float-overlay .row { margin: 6px 0; }
+    .float-overlay .buttons { gap:6px; }
+    .float-overlay .close { background:#eee; border:1px solid #bbb; border-radius:6px; cursor:pointer; padding:4px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Meeting-Kosten</h1>
+  <div class="time" id="time">00:00:00</div>
+
+  <section class="params">
+    <div class="row">
+      <label for="name">Meeting-Name</label>
+      <input id="name" type="text" placeholder="z. B. Sprint Planning" />
+    </div>
+
+    <div class="row">
+      <label for="participants">Teilnehmer gesamt</label>
+      <input id="participants" type="number" min="0" step="1" value="4" />
+    </div>
+
+    <div class="row two">
+      <div>
+        <label for="rateInternal">Satz intern (€/h)</label>
+        <input id="rateInternal" type="number" min="0" step="0.01" value="70" />
+      </div>
+      <div>
+        <label for="rateExternal">Satz extern (€/h)</label>
+        <input id="rateExternal" type="number" min="0" step="0.01" value="120" />
+      </div>
+    </div>
+  </section>
+
+  <section class="buttons">
+    <button id="startPause">Start</button>
+    <button id="reset">Reset</button>
+    <button id="save">Meeting speichern (Ctrl+S)</button>
+    <button id="exportJson">Meetings exportieren (JSON)</button>
+    <button id="importJson">Meetings importieren (JSON)</button>
+    <button id="clearAll">Alle löschen</button>
+    <button id="toggleOverlay">Ausdocken (Overlay)</button>
+    <input id="importFile" type="file" accept="application/json" style="display:none" />
+  </section>
+
+  <section class="costs">
+    <div>Intern: <strong id="costInternal">0,00 €</strong></div>
+    <div>Extern: <strong id="costExternal">0,00 €</strong></div>
+  </section>
+
+  <p id="status"></p>
+  <p class="muted">Overlay-Hinweis: Echte Always-on-Top-Overlays funktionieren mit Chrome/Edge (Document Picture-in-Picture). In anderen Browsern nutzt die Seite ein schwebendes Panel innerhalb der Seite.</p>
+
+  <section class="saved">
+    <h2>Gespeicherte Meetings <span id="meetingCount" class="count"></span></h2>
+    <div id="list"></div>
+  </section>
+
+  <script>
+    // Elemente
+    const els = {
+      time: document.getElementById('time'),
+      name: document.getElementById('name'),
+      participants: document.getElementById('participants'),
+      rateInternal: document.getElementById('rateInternal'),
+      rateExternal: document.getElementById('rateExternal'),
+      startPause: document.getElementById('startPause'),
+      reset: document.getElementById('reset'),
+      save: document.getElementById('save'),
+      exportJson: document.getElementById('exportJson'),
+      importJson: document.getElementById('importJson'),
+      importFile: document.getElementById('importFile'),
+      clearAll: document.getElementById('clearAll'),
+      costInternal: document.getElementById('costInternal'),
+      costExternal: document.getElementById('costExternal'),
+      toggleOverlay: document.getElementById('toggleOverlay'),
+      status: document.getElementById('status'),
+      list: document.getElementById('list'),
+      meetingCount: document.getElementById('meetingCount')
+    };
+
+    // Timer-Status
+    let running = false;
+    let startTime = 0;      // performance.now() in ms
+    let elapsedBefore = 0;  // akkumulierte ms (bei Pausen)
+
+    const euroFmt = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
+
+    function formatTime(totalSeconds) {
+      const sec = Math.max(0, Math.floor(totalSeconds));
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function parseRate(v) {
+      if (typeof v !== 'string') v = String(v ?? '');
+      v = v.replace(',', '.').trim();
+      const n = parseFloat(v);
+      return isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function parseIntSafe(v) {
+      const n = parseInt(String(v ?? '0'), 10);
+      return isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function currentElapsedMs() {
+      return running ? (elapsedBefore + (performance.now() - startTime)) : elapsedBefore;
+    }
+
+    function computeCanSave(elapsedSec) {
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+      return (els.name.value.trim() !== '') && (elapsedSec > 0) && (p > 0) && (iRate > 0 || eRate > 0);
+    }
+
+    function updateUI() {
+      const elapsedSec = currentElapsedMs() / 1000;
+      els.time.textContent = formatTime(elapsedSec);
+
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+      const hours = elapsedSec / 3600;
+
+      const costIn = p * iRate * hours;
+      const costEx = p * eRate * hours;
+
+      els.costInternal.textContent = euroFmt.format(costIn);
+      els.costExternal.textContent = euroFmt.format(costEx);
+
+      const canSave = computeCanSave(elapsedSec);
+      els.save.disabled = !canSave;
+
+      // Overlay mit-aktualisieren
+      updateOverlayUI({ elapsedSec, costIn, costEx, canSave });
+    }
+
+    function toggleStartPause() {
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+
+      if (!running) {
+        if (p <= 0) { setStatus('Bitte mindestens 1 Teilnehmer angeben.', true); els.participants.focus(); return; }
+        if (iRate <= 0 && eRate <= 0) { setStatus('Bitte mindestens einen Stundensatz > 0 angeben.', true); els.rateInternal.focus(); return; }
+        running = true;
+        startTime = performance.now();
+        els.startPause.textContent = 'Pause';
+        setStatus('');
+      } else {
+        running = false;
+        elapsedBefore += (performance.now() - startTime);
+        els.startPause.textContent = 'Weiter';
+      }
+      updateUI();
+    }
+
+    function resetAll() {
+      running = false;
+      startTime = 0;
+      elapsedBefore = 0;
+      els.startPause.textContent = 'Start';
+      setStatus('');
+      updateUI();
+    }
+
+    function setStatus(msg, isError = false) {
+      els.status.textContent = msg || '';
+      els.status.classList.toggle('error', !!isError);
+    }
+
+    // JSON-Speicher (localStorage)
+    const STORE_KEY = 'meeting_costs_store_v1';
+    function loadStore() {
+      try {
+        const raw = localStorage.getItem(STORE_KEY);
+        if (!raw) return { nextId: 1, meetings: [] };
+        const parsed = JSON.parse(raw);
+        return {
+          nextId: Number.isInteger(parsed?.nextId) ? parsed.nextId : 1,
+          meetings: Array.isArray(parsed?.meetings) ? parsed.meetings : []
+        };
+      } catch (e) {
+        console.warn('Store defekt, neu initialisieren.', e);
+        return { nextId: 1, meetings: [] };
+      }
+    }
+    function saveStore() { localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
+    let store = loadStore();
+
+    function addMeeting(entry) {
+      entry.id = store.nextId++;
+      store.meetings.push(entry);
+      saveStore();
+      renderMeetingList();
+      return entry.id;
+    }
+    function deleteMeeting(id) {
+      const idx = store.meetings.findIndex(m => m.id === id);
+      if (idx >= 0) { store.meetings.splice(idx, 1); saveStore(); renderMeetingList(); }
+    }
+    function clearAllMeetings() {
+      if (!store.meetings.length) return;
+      if (confirm('Wirklich alle gespeicherten Meetings löschen?')) {
+        store = { nextId: 1, meetings: [] }; saveStore(); renderMeetingList(); setStatus('Alle Meetings gelöscht.');
+      }
+    }
+    function exportMeetings() {
+      const data = JSON.stringify({ meetings: store.meetings }, null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'meetings.json';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      setStatus('Meetings exportiert (meetings.json).');
+    }
+    function importMeetingsFromFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const text = String(reader.result || '');
+          const parsed = JSON.parse(text);
+          const imported = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.meetings) ? parsed.meetings : null);
+          if (!imported) { setStatus('Import fehlgeschlagen: ungültiges Format.', true); return; }
+          if (!confirm('Import überschreibt aktuelle Meetings. Fortfahren?')) return;
+          const normalized = imported.map((m, i) => ({
+            id: i + 1,
+            name: String(m.name ?? '').slice(0, 200),
+            durationSeconds: Math.max(0, parseInt(m.durationSeconds ?? 0, 10)),
+            participants: Math.max(0, parseInt(m.participants ?? 0, 10)),
+            rateInternal: Number(m.rateInternal ?? 0),
+            rateExternal: Number(m.rateExternal ?? 0),
+            costInternal: Number(m.costInternal ?? 0),
+            costExternal: Number(m.costExternal ?? 0),
+            createdAt: m.createdAt ? String(m.createdAt) : new Date().toISOString()
+          }));
+          store = { nextId: normalized.length + 1, meetings: normalized }; saveStore(); renderMeetingList();
+          setStatus(`Import erfolgreich: ${normalized.length} Meeting(s) übernommen.`);
+        } catch (e) { console.error(e); setStatus('Import fehlgeschlagen.', true); }
+      };
+      reader.readAsText(file);
+    }
+    function escapeHtml(s) {
+      return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+    }
+    function renderMeetingList() {
+      const meetings = store.meetings.slice().sort((a, b) => (b.id - a.id));
+      els.meetingCount.textContent = `(${meetings.length} gespeichert)`;
+      if (!meetings.length) { els.list.innerHTML = '<p class="muted">Noch keine Meetings gespeichert.</p>'; return; }
+      const rows = meetings.map(m => {
+        const created = new Date(m.createdAt || Date.now());
+        return `
+          <tr>
+            <td class="nowrap">#${m.id}</td>
+            <td>${escapeHtml(m.name || '')}</td>
+            <td class="nowrap">${formatTime(m.durationSeconds || 0)}</td>
+            <td class="nowrap">${euroFmt.format(m.costInternal || 0)}</td>
+            <td class="nowrap">${euroFmt.format(m.costExternal || 0)}</td>
+            <td class="nowrap">${created.toLocaleString('de-DE')}</td>
+            <td class="actions"><button data-del="${m.id}">Löschen</button></td>
+          </tr>
+        `;
+      }).join('');
+      els.list.innerHTML = `
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Name</th><th>Dauer</th><th>Intern</th><th>Extern</th><th>Erstellt</th><th>Aktion</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+      els.list.querySelectorAll('button[data-del]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = parseInt(btn.getAttribute('data-del'), 10);
+          if (confirm(`Meeting #${id} löschen?`)) deleteMeeting(id);
+        });
+      });
+    }
+
+    // Speichern
+    function onSaveMeeting() {
+      const elapsedSec = Math.floor(currentElapsedMs() / 1000);
+      if (elapsedSec <= 0) { setStatus('Dauer ist 0 Sekunden – bitte erst starten.', true); return; }
+      const name = els.name.value.trim();
+      if (!name) { setStatus('Bitte einen Meeting-Namen eingeben.', true); els.name.focus(); return; }
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+      if (p <= 0 || (iRate <= 0 && eRate <= 0)) { setStatus('Teilnehmerzahl > 0 und mindestens ein Stundensatz > 0 erforderlich.', true); return; }
+      const hours = elapsedSec / 3600;
+      const costIn = Math.round((p * iRate * hours) * 100) / 100;
+      const costEx = Math.round((p * eRate * hours) * 100) / 100;
+      const id = addMeeting({
+        name, durationSeconds: elapsedSec, participants: p,
+        rateInternal: iRate, rateExternal: eRate,
+        costInternal: costIn, costExternal: costEx,
+        createdAt: new Date().toISOString()
+      });
+      setStatus(`Gespeichert (ID: ${id}).`);
+      updateUI();
+    }
+
+    // Overlay: Document Picture-in-Picture + Fallback
+    let pipWin = null;
+    let pipEls = null;
+    let floatOverlay = null;
+    let floatEls = null;
+
+    function isOverlayOpen() { return !!(pipWin || floatOverlay); }
+    function updateOverlayToggleBtn() {
+      els.toggleOverlay.textContent = isOverlayOpen() ? 'Andocken' : 'Ausdocken (Overlay)';
+    }
+
+    async function openOverlay() {
+      if ('documentPictureInPicture' in window && documentPictureInPicture?.requestWindow) {
+        try { await openPipOverlay(); return; } catch (e) { console.warn('Doc PiP fehlgeschlagen, Fallback:', e); }
+      }
+      openInPageOverlay();
+    }
+
+    async function openPipOverlay() {
+      if (pipWin) return;
+      pipWin = await documentPictureInPicture.requestWindow({ width: 360, height: 320 });
+      const d = pipWin.document;
+      d.title = 'Meeting Overlay';
+      d.body.style.margin = '0';
+      d.body.innerHTML = `
+        <style>
+          body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; padding:10px; }
+          .time { font-weight:700; font-size:24px; margin-bottom:8px; }
+          .row { display:flex; gap:8px; align-items:center; margin:4px 0; }
+          label { width:110px; font-size:12px; color:#444; }
+          input[type="text"], input[type="number"] { padding:4px 6px; width:150px; border:1px solid #bbb; border-radius:6px; }
+          .costs div { margin:2px 0; }
+          .buttons { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+          button { padding:6px 10px; border:1px solid #aaa; background:#f5f5f5; border-radius:6px; cursor:pointer; }
+          button:disabled { opacity:.6; cursor:not-allowed; }
+        </style>
+        <div class="time" id="pipTime">00:00:00</div>
+        <div class="costs">
+          <div>Intern: <strong id="pipCostIn">0,00 €</strong></div>
+          <div>Extern: <strong id="pipCostEx">0,00 €</strong></div>
+        </div>
+        <div class="row"><label>Name</label><input id="pipName" type="text" placeholder="Meeting-Name"></div>
+        <div class="row"><label>Teilnehmer</label><input id="pipParticipants" type="number" min="0" step="1"></div>
+        <div class="row"><label>Satz intern</label><input id="pipRateIn" type="number" min="0" step="0.01"></div>
+        <div class="row"><label>Satz extern</label><input id="pipRateEx" type="number" min="0" step="0.01"></div>
+        <div class="buttons">
+          <button id="pipStartPause">Start</button>
+          <button id="pipReset">Reset</button>
+          <button id="pipSave" disabled>Speichern</button>
+          <button id="pipClose">Schließen</button>
+        </div>
+      `;
+      pipEls = {
+        time: d.getElementById('pipTime'),
+        costIn: d.getElementById('pipCostIn'),
+        costEx: d.getElementById('pipCostEx'),
+        name: d.getElementById('pipName'),
+        participants: d.getElementById('pipParticipants'),
+        rateIn: d.getElementById('pipRateIn'),
+        rateEx: d.getElementById('pipRateEx'),
+        startPause: d.getElementById('pipStartPause'),
+        reset: d.getElementById('pipReset'),
+        save: d.getElementById('pipSave'),
+        close: d.getElementById('pipClose')
+      };
+      // Bridge Events -> Hauptfenster
+      pipEls.startPause.addEventListener('click', () => toggleStartPause());
+      pipEls.reset.addEventListener('click', () => resetAll());
+      pipEls.save.addEventListener('click', () => onSaveMeeting());
+      pipEls.close.addEventListener('click', () => closeOverlay());
+      [pipEls.name, pipEls.participants, pipEls.rateIn, pipEls.rateEx].forEach(el => {
+        el.addEventListener('input', () => {
+          els.name.value = pipEls.name.value;
+          els.participants.value = pipEls.participants.value;
+          els.rateInternal.value = pipEls.rateIn.value;
+          els.rateExternal.value = pipEls.rateEx.value;
+          updateUI();
+        });
+      });
+      // Shortcuts im Overlay
+      d.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); onSaveMeeting(); }
+        else if (e.key === ' ') { e.preventDefault(); toggleStartPause(); }
+        else if (e.key === 'Escape') { resetAll(); }
+      });
+      // Schließen-Handler
+      pipWin.addEventListener('pagehide', () => closeOverlay(), { once: true });
+      // Initialwerte spiegeln
+      syncInputsToOverlay();
+      updateUI();
+      updateOverlayToggleBtn();
+    }
+
+    function openInPageOverlay() {
+      if (floatOverlay) return;
+      floatOverlay = document.createElement('div');
+      floatOverlay.className = 'float-overlay';
+      floatOverlay.innerHTML = `
+        <div class="hdr"><strong>Meeting Overlay</strong><button class="close" id="foClose">×</button></div>
+        <div class="body">
+          <div class="time" id="foTime">00:00:00</div>
+          <div class="costs">
+            <div>Intern: <strong id="foCostIn">0,00 €</strong></div>
+            <div>Extern: <strong id="foCostEx">0,00 €</strong></div>
+          </div>
+          <div class="row"><label style="width:90px">Name</label><input id="foName" type="text" placeholder="Meeting-Name"></div>
+          <div class="row"><label style="width:90px">Teilnehmer</label><input id="foParticipants" type="number" min="0" step="1"></div>
+          <div class="row"><label style="width:90px">Satz intern</label><input id="foRateIn" type="number" min="0" step="0.01"></div>
+          <div class="row"><label style="width:90px">Satz extern</label><input id="foRateEx" type="number" min="0" step="0.01"></div>
+          <div class="buttons">
+            <button id="foStartPause">Start</button>
+            <button id="foReset">Reset</button>
+            <button id="foSave" disabled>Speichern</button>
+            <button id="foDock">Andocken</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(floatOverlay);
+      const d = floatOverlay;
+      floatEls = {
+        root: d,
+        hdr: d.querySelector('.hdr'),
+        time: d.querySelector('#foTime'),
+        costIn: d.querySelector('#foCostIn'),
+        costEx: d.querySelector('#foCostEx'),
+        name: d.querySelector('#foName'),
+        participants: d.querySelector('#foParticipants'),
+        rateIn: d.querySelector('#foRateIn'),
+        rateEx: d.querySelector('#foRateEx'),
+        startPause: d.querySelector('#foStartPause'),
+        reset: d.querySelector('#foReset'),
+        save: d.querySelector('#foSave'),
+        close: d.querySelector('#foClose'),
+        dock: d.querySelector('#foDock')
+      };
+      // Drag bewegen
+      let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+      floatEls.hdr.addEventListener('pointerdown', (e) => {
+        dragging = true; floatOverlay.setPointerCapture(e.pointerId);
+        startX = e.clientX; startY = e.clientY;
+        const rect = floatOverlay.getBoundingClientRect();
+        startLeft = rect.left; startTop = rect.top;
+      });
+      floatEls.hdr.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX, dy = e.clientY - startY;
+        floatOverlay.style.left = (startLeft + dx) + 'px';
+        floatOverlay.style.top = (startTop + dy) + 'px';
+        floatOverlay.style.right = 'auto';
+      });
+      floatEls.hdr.addEventListener('pointerup', (e) => { dragging = false; floatOverlay.releasePointerCapture(e.pointerId); });
+
+      // Events -> Hauptfenster
+      floatEls.startPause.addEventListener('click', () => toggleStartPause());
+      floatEls.reset.addEventListener('click', () => resetAll());
+      floatEls.save.addEventListener('click', () => onSaveMeeting());
+      floatEls.close.addEventListener('click', () => closeOverlay());
+      floatEls.dock.addEventListener('click', () => closeOverlay());
+      [floatEls.name, floatEls.participants, floatEls.rateIn, floatEls.rateEx].forEach(el => {
+        el.addEventListener('input', () => {
+          els.name.value = floatEls.name.value;
+          els.participants.value = floatEls.participants.value;
+          els.rateInternal.value = floatEls.rateIn.value;
+          els.rateExternal.value = floatEls.rateEx.value;
+          updateUI();
+        });
+      });
+      // Initialwerte spiegeln
+      syncInputsToOverlay();
+      updateUI();
+      updateOverlayToggleBtn();
+    }
+
+    function syncInputsToOverlay() {
+      if (pipEls) {
+        pipEls.name.value = els.name.value;
+        pipEls.participants.value = els.participants.value;
+        pipEls.rateIn.value = els.rateInternal.value;
+        pipEls.rateEx.value = els.rateExternal.value;
+      }
+      if (floatEls) {
+        floatEls.name.value = els.name.value;
+        floatEls.participants.value = els.participants.value;
+        floatEls.rateIn.value = els.rateInternal.value;
+        floatEls.rateEx.value = els.rateExternal.value;
+      }
+    }
+
+    function closeOverlay() {
+      if (pipWin) { try { pipWin.close(); } catch {} pipWin = null; pipEls = null; }
+      if (floatOverlay) { floatOverlay.remove(); floatOverlay = null; floatEls = null; }
+      updateOverlayToggleBtn();
+    }
+
+    function updateOverlayUI({ elapsedSec, costIn, costEx, canSave }) {
+      const btnText = running ? 'Pause' : (elapsedBefore > 0 ? 'Weiter' : 'Start');
+      if (pipEls) {
+        pipEls.time.textContent = formatTime(elapsedSec);
+        pipEls.costIn.textContent = euroFmt.format(costIn);
+        pipEls.costEx.textContent = euroFmt.format(costEx);
+        pipEls.startPause.textContent = btnText;
+        pipEls.save.disabled = !canSave;
+      }
+      if (floatEls) {
+        floatEls.time.textContent = formatTime(elapsedSec);
+        floatEls.costIn.textContent = euroFmt.format(costIn);
+        floatEls.costEx.textContent = euroFmt.format(costEx);
+        floatEls.startPause.textContent = btnText;
+        floatEls.save.disabled = !canSave;
+      }
+    }
+
+    // Events
+    els.startPause.addEventListener('click', toggleStartPause);
+    els.reset.addEventListener('click', resetAll);
+    els.save.addEventListener('click', onSaveMeeting);
+    els.exportJson.addEventListener('click', exportMeetings);
+    els.importJson.addEventListener('click', () => els.importFile.click());
+    els.importFile.addEventListener('change', () => {
+      const file = els.importFile.files?.[0];
+      if (file) importMeetingsFromFile(file);
+      els.importFile.value = '';
+    });
+    els.clearAll.addEventListener('click', clearAllMeetings);
+    els.toggleOverlay.addEventListener('click', () => { isOverlayOpen() ? closeOverlay() : openOverlay(); });
+
+    ['input', 'change'].forEach(evt => {
+      [els.name, els.participants, els.rateInternal, els.rateExternal].forEach(el => {
+        el.addEventListener(evt, () => { setStatus(''); updateUI(); syncInputsToOverlay(); });
+      });
+    });
+
+    // Shortcuts (Hauptfenster)
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); onSaveMeeting(); }
+      else if (e.key === ' ') {
+        const tag = document.activeElement?.tagName?.toLowerCase();
+        if (tag !== 'input' && tag !== 'textarea') { e.preventDefault(); toggleStartPause(); }
+      } else if (e.key === 'Escape') { resetAll(); }
+    });
+
+    // Ticker
+    setInterval(updateUI, 200);
+
+    // Initial
+    renderMeetingList();
+    updateUI();
+    updateOverlayToggleBtn();
+  </script>
+</body>
+</html>
