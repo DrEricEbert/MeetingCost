@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Meeting-Kosten (HTML/JS, ohne DB)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --fg:#222; --muted:#666; --accent:#0067c0; }
+    * { box-sizing:border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color:var(--fg); margin:16px; }
+    h1 { font-size:18px; margin:0 0 12px; }
+    .time { font-weight:700; font-size:32px; letter-spacing:1px; }
+    .params, .costs { margin-top:12px; }
+    .row { display:flex; gap:12px; align-items:center; margin:6px 0; }
+    .row.two > div { display:flex; flex-direction:column; }
+    label { width:160px; }
+    input[type="text"], input[type="number"] { padding:6px 8px; border:1px solid #bbb; border-radius:6px; width:200px; }
+    .buttons { margin:12px 0; display:flex; gap:8px; flex-wrap:wrap; }
+    button { padding:8px 12px; border:1px solid #aaa; background:#f5f5f5; border-radius:6px; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .costs div { margin:4px 0; }
+    #status { min-height:1.2em; margin-top:8px; color:#b00020; }
+    .muted { color:var(--muted); font-size:12px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h1>Meeting-Kosten</h1>
+  <div class="time" id="time">00:00:00</div>
+
+  <section class="params">
+    <div class="row">
+      <label for="name">Meeting-Name</label>
+      <input id="name" type="text" placeholder="z. B. Sprint Planning" />
+    </div>
+
+    <div class="row">
+      <label for="participants">Teilnehmer gesamt</label>
+      <input id="participants" type="number" min="0" step="1" value="4" />
+    </div>
+
+    <div class="row two">
+      <div>
+        <label for="rateInternal">Satz intern (€/h)</label>
+        <input id="rateInternal" type="number" min="0" step="0.01" value="70" />
+      </div>
+      <div>
+        <label for="rateExternal">Satz extern (€/h)</label>
+        <input id="rateExternal" type="number" min="0" step="0.01" value="120" />
+      </div>
+    </div>
+  </section>
+
+  <section class="buttons">
+    <button id="startPause">Start</button>
+    <button id="reset">Reset</button>
+  </section>
+
+  <section class="costs">
+    <div>Intern: <strong id="costInternal">0,00 €</strong></div>
+    <div>Extern: <strong id="costExternal">0,00 €</strong></div>
+  </section>
+
+  <p id="status"></p>
+  <p class="muted">Hinweis: Keine Speicherung. Nach Neuladen ist alles zurückgesetzt.</p>
+
+  <script>
+    // Elemente
+    const els = {
+      time: document.getElementById('time'),
+      name: document.getElementById('name'),
+      participants: document.getElementById('participants'),
+      rateInternal: document.getElementById('rateInternal'),
+      rateExternal: document.getElementById('rateExternal'),
+      startPause: document.getElementById('startPause'),
+      reset: document.getElementById('reset'),
+      costInternal: document.getElementById('costInternal'),
+      costExternal: document.getElementById('costExternal'),
+      status: document.getElementById('status')
+    };
+
+    // Timer-Status
+    let running = false;
+    let startTime = 0;      // performance.now() in ms
+    let elapsedBefore = 0;  // akkumulierte ms (bei Pausen)
+
+    const euroFmt = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
+
+    function formatTime(totalSeconds) {
+      const sec = Math.max(0, Math.floor(totalSeconds));
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function parseRate(v) {
+      if (typeof v !== 'string') v = String(v ?? '');
+      v = v.replace(',', '.').trim();
+      const n = parseFloat(v);
+      return isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function parseIntSafe(v) {
+      const n = parseInt(String(v ?? '0'), 10);
+      return isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function currentElapsedMs() {
+      return running ? (elapsedBefore + (performance.now() - startTime)) : elapsedBefore;
+    }
+
+    function updateUI() {
+      const elapsedSec = currentElapsedMs() / 1000;
+      els.time.textContent = formatTime(elapsedSec);
+
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+      const hours = elapsedSec / 3600;
+
+      const costIn = p * iRate * hours;
+      const costEx = p * eRate * hours;
+
+      els.costInternal.textContent = euroFmt.format(costIn);
+      els.costExternal.textContent = euroFmt.format(costEx);
+    }
+
+    function toggleStartPause() {
+      const p = parseIntSafe(els.participants.value);
+      const iRate = parseRate(els.rateInternal.value);
+      const eRate = parseRate(els.rateExternal.value);
+
+      if (!running) {
+        if (p <= 0) {
+          els.status.textContent = 'Bitte mindestens 1 Teilnehmer angeben.';
+          els.participants.focus();
+          return;
+        }
+        if (iRate <= 0 && eRate <= 0) {
+          els.status.textContent = 'Bitte mindestens einen Stundensatz > 0 angeben.';
+          els.rateInternal.focus();
+          return;
+        }
+        running = true;
+        startTime = performance.now();
+        els.startPause.textContent = 'Pause';
+        els.status.textContent = '';
+      } else {
+        running = false;
+        elapsedBefore += (performance.now() - startTime);
+        els.startPause.textContent = 'Weiter';
+      }
+    }
+
+    function resetAll() {
+      running = false;
+      startTime = 0;
+      elapsedBefore = 0;
+      els.startPause.textContent = 'Start';
+      els.status.textContent = '';
+      updateUI();
+    }
+
+    // Events
+    els.startPause.addEventListener('click', toggleStartPause);
+    els.reset.addEventListener('click', resetAll);
+
+    ['input', 'change'].forEach(evt => {
+      [els.name, els.participants, els.rateInternal, els.rateExternal].forEach(el => {
+        el.addEventListener(evt, () => {
+          els.status.textContent = '';
+          updateUI();
+        });
+      });
+    });
+
+    // Shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.key === ' ') {
+        const tag = document.activeElement?.tagName?.toLowerCase();
+        if (tag !== 'input' && tag !== 'textarea') {
+          e.preventDefault();
+          toggleStartPause();
+        }
+      } else if (e.key === 'Escape') {
+        resetAll();
+      }
+    });
+
+    // Ticker
+    setInterval(updateUI, 200);
+
+    // Initial
+    updateUI();
+  </script>
+</body>
+</html>
